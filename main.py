@@ -1,88 +1,78 @@
-# roberta_text_classifier_manual.py
-
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from transformers import RobertaTokenizer, RobertaForSequenceClassification
-from torch.optim import AdamW 
 import pandas as pd
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from textstat import flesch_reading_ease
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
 
-# 1. Dummy dataset
-data = {
-    'text': [
-        "This essay explains economic growth over decades.",  # Human
-        "As an AI language model, I believe that the economy is driven by...",  # AI
+# Step 1: NLTK resource setup
+nltk.download("punkt")
+nltk.download("stopwords")
+custom_stopwords = set(stopwords.words("english"))
+
+# Step 2: Custom dataset (new examples)
+samples = {
+    "content": [
+        "Humans write in fragmented ways with emotion.",
+        "This message is structured by a neural system.",
+        "Natural writing often lacks perfect grammar.",
+        "AI-generated outputs are grammatically clean.",
+        "Emotion and slang fill most human speech.",
+        "AI replies follow a learned statistical pattern.",
+        "Mistakes and abbreviations are typical in human typing.",
+        "Language model outputs tend to be balanced.",
+        "Creative flow is more present in human essays.",
+        "Machine-generated text sounds more generic and polished."
     ],
-    'label': [0, 1]  # 0 = Human, 1 = AI
+    "source": ["human", "ai", "human", "ai", "human", "ai", "human", "ai", "human", "ai"]
 }
-df = pd.DataFrame(data)
+df_data = pd.DataFrame(samples)
 
-# 2. Tokenizer
-tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+# Step 3: Text cleaning function
+def clean_text(line):
+    tokens = word_tokenize(line.lower())
+    tokens = [t for t in tokens if t.isalnum() and t not in custom_stopwords]
+    return " ".join(tokens)
 
-# 3. Custom Dataset
-class TextDataset(Dataset):
-    def __init__(self, dataframe):
-        self.texts = dataframe["text"].tolist()
-        self.labels = dataframe["label"].tolist()
+df_data["clean"] = df_data["content"].apply(clean_text)
 
-    def __len__(self):
-        return len(self.texts)
+# Step 4: Feature engineering
+def text_features(line):
+    words = word_tokenize(line)
+    total_words = len(words)
+    total_chars = sum(len(w) for w in words)
+    diversity = len(set(words)) / total_words if total_words else 0
+    readability = flesch_reading_ease(line)
+    return pd.Series([total_words, total_chars, diversity, readability])
 
-    def __getitem__(self, idx):
-        encoding = tokenizer(
-            self.texts[idx],
-            padding="max_length",
-            truncation=True,
-            max_length=128,
-            return_tensors="pt"
-        )
-        item = {
-            "input_ids": encoding["input_ids"].squeeze(),
-            "attention_mask": encoding["attention_mask"].squeeze(),
-            "labels": torch.tensor(self.labels[idx])
-        }
-        return item
+df_data[["words", "chars", "diversity", "readability"]] = df_data["content"].apply(text_features)
 
-# 4. DataLoader
-dataset = TextDataset(df)
-loader = DataLoader(dataset, batch_size=2, shuffle=True)
+# Step 5: TF-IDF vectorization
+tfidf = TfidfVectorizer(ngram_range=(1, 2))
+X_matrix = tfidf.fit_transform(df_data["clean"])
+y_labels = df_data["source"].apply(lambda tag: 1 if tag == "ai" else 0)
 
-# 5. Model
-model = RobertaForSequenceClassification.from_pretrained("roberta-base", num_labels=2)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+# Step 6: Data split
+X_train, X_test, y_train, y_test = train_test_split(
+    X_matrix, y_labels, test_size=0.3, random_state=42, stratify=y_labels
+)
 
-# 6. Training Setup
-optimizer = AdamW(model.parameters(), lr=2e-5)
-loss_fn = nn.CrossEntropyLoss()
+# Step 7: Model training
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_model.fit(X_train, y_train)
+predictions = rf_model.predict(X_test)
+print(f"Model Performance (Accuracy): {accuracy_score(y_test, predictions):.2f}")
 
-# 7. Training Loop
-model.train()
-for epoch in range(3):
-    for batch in loader:
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
+# Step 8: AI/Human prediction function
+def classify_text(input_text):
+    cleaned = clean_text(input_text)
+    vec_input = tfidf.transform([cleaned])
+    result = rf_model.predict(vec_input)[0]
+    return "AI-Generated" if result == 1 else "Human-Written"
 
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        loss = loss_fn(outputs.logits, labels)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    print(f"Epoch {epoch + 1} Loss: {loss.item():.4f}")
-
-# 8. Prediction Function
-def predict(text):
-    model.eval()
-    with torch.no_grad():
-        encoding = tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            padding="max_length",
-            max_length=128
-        )
-        input
+# Test the function
+example_input = "Creative flow is more present in human essays."
+print("Detection Result:", classify_text(example_input))
